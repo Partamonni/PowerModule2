@@ -474,11 +474,14 @@ unsigned int adConversion(byte ch)
   
   ADCSRA = B11000111; // Start conversion (first 2 bits from left) with prescaler 128 (last 3 bits)
   while ((ADCSRA & (1<<ADSC)) != 0) {}; // Wait for status bit to flip
-  // First reading is garbage if MUX was changed, so lets just forget this value
-  
-  ADCSRA = (1<<ADSC); // Start conversion again
-  while ((ADCSRA & (1<<ADSC)) != 0) {};
+  // First readings are garbage if MUX was changed, so lets just forget few results
 
+  for(int i = 0; i < 3; ++i)
+  {
+    ADCSRA = (1<<ADSC); // Start conversion again
+    while ((ADCSRA & (1<<ADSC)) != 0) {};
+  }
+  
   return ADC;
 }
 
@@ -638,10 +641,8 @@ void interruptSetup()
 
 ISR(TIMER1_COMPA_vect) // timer1 interrupt
 {
-  // Selecting internal 1.1V voltage reference to MUX gets us the basepoint calculating the real voltage
-  board5v = 1125.3 / (unsigned int)adConversion(0b1110) ; // Simplified Function of 5V*((1.1/5)*1023)/vref1v1
-  voltage = 179.0 * (unsigned int)adConversion(vsense) * board5v / 9207; // Simplified Function of (vsense/1023)*board5v*(537/27)
-
+  voltage = 895.0 * (float)adConversion(vsense) / 9207.0; // Simplified Function of (vsense/1023)*board5v*(537/27)
+  
   #if !DEBUG
   if(voltage > OVERVOLTAGE)
   {
@@ -650,8 +651,8 @@ ISR(TIMER1_COMPA_vect) // timer1 interrupt
   }
   #endif
   
-  // Can measure accuracy to ~0.25A
-  current = board5v * (((unsigned int)adConversion(curSense) - (unsigned int)adConversion(curSenseRef)) / 1023) / 0.02;
+  // Max accuracy ~0.5A, theoretically ~0.24 A
+  current = 250.0 * ((float)adConversion(curSense) - (float)adConversion(curSenseRef)) / 1023.0;
 
   #if !DEBUG
   if(current > OVERCURRENT)
@@ -687,16 +688,14 @@ ISR(TIMER1_COMPA_vect) // timer1 interrupt
 
 ISR(USART_RX_vect)
 {
-  static byte tmp = UDR0;
-  if(tmp == '!')
-    PORTC &= ~(1<<mosfetSwitch);
-    
   if((in_e+1) % READ_BUFFER_SIZE == in_s)
     bufferFull = true;
   else
   {
+    serialInput[in_e] = UDR0; 
+    if(serialInput[in_e] == '!')
+      PORTC &= ~(1<<mosfetSwitch);
     bufferFull = false;
-    serialInput[in_e] = tmp;
     if(serialInput[in_e] == '\n')
       commandAvailable = true;
     in_e = (in_e+1) % READ_BUFFER_SIZE;
