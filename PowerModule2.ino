@@ -1,9 +1,9 @@
-/* K-ev Power-Module script v2.0
+/* K-ev Power-Module program v2.1
 
    Written by Henri Pyoria (henri.pyoria@outlook.com)
 
    Temperature-IC addresses must be manually defined
-   to tempAdr table. This skips teh lengthy search for 'em.
+   to tempAddr table. This skips teh lengthy search for 'em.
    IC's must support resolution configuration! (10bit conversion is used)
 
    2s watchdog implemented after the setups ready, in case of odd failures.
@@ -28,26 +28,39 @@
 
 #define WRITE_BUFFER_SIZE 10
 #define READ_BUFFER_SIZE 100
+#define CMD_CHAR_COUNT 3 // Module receives only specified length commands ending in '\n'. Count excludes the '\0' char.
+
 #define TMP_COUNT 40
 #define FAN_MAX_DUTY_CYCLE 255
-#define CMD_CHAR_COUNT 3 // Module receives only specified length commands ending in '\n'. Count excludes the '\0' char.
-#define OVERCURRENT 50
-#define OVERVOLTAGE 85
-#define LOW_VOLTAGE 10 //60
-#define OVER_HEAT 60
+#define FAN_ON_THRESH 25 // 'C
+#define FAN_MAX_THRESH 65 // 'C
 
-#define HOST_QUERY_TIME 5000
+#define OVERCURRENT 50 // A
+#define OVERVOLTAGE 85 // V
+#if DEMO
+  #define LOW_VOLTAGE 10
+#else
+  #define LOW_VOLTAGE 60
+#endif
+#define OVER_HEAT 60 // 'C
+
+#define HOST_QUERY_TIME 5000 // ms
 // ms, time to wait host to answer back before shutting gates
-#define EEPROM_SAVE_INTERVAL 3600000
-#define READ_TIME 200
+#define EEPROM_SAVE_INTERVAL 3600000 // ms
+#define READ_TIME 200 // ms
 // ms, for temperature sensors to sample readings and while monitoring is on
+
+// Start bytes for variables located in EEPROM
+#define SOC_START 0 
+#define SOH_START 4 
 
 
 OneWire ds(10);
 
-const byte tempAdr[TMP_COUNT][8] PROGMEM =
+const byte moduleTempAddr[8] PROGMEM = {0x28, 0xF4, 0x2E, 0x41, 0x09, 0x00, 0x00, 0x0B};
+const byte tempAddr[TMP_COUNT][8] PROGMEM =
 { 
-  //{0x28, 0xBA, 0x4B, 0x41, 0x09, 0x00, 0x00, 0xAE},
+  {0x28, 0xBA, 0x4B, 0x41, 0x09, 0x00, 0x00, 0xAE},
   {0x28, 0xEE, 0x46, 0x41, 0x09, 0x00, 0x00, 0xB0},
   {0x28, 0x4C, 0x2B, 0x41, 0x09, 0x00, 0x00, 0x7F},
   {0x28, 0x68, 0x43, 0x41, 0x09, 0x00, 0x00, 0x3A},
@@ -93,11 +106,14 @@ const byte tempAdr[TMP_COUNT][8] PROGMEM =
   {0x28, 0x18, 0x4E, 0x41, 0x09, 0x00, 0x00, 0x4E},
   {0x28, 0x4F, 0x27, 0x41, 0x09, 0x00, 0x00, 0x07},
   {0x28, 0x8D, 0x3B, 0x41, 0x09, 0x00, 0x00, 0xAB},
-  {0x28, 0x7B, 0x38, 0x41, 0x09, 0x00, 0x00, 0x25},
-
-  {0x28, 0xF4, 0x2E, 0x41, 0x09, 0x00, 0x00, 0x0B}
+  {0x28, 0x7B, 0x38, 0x41, 0x09, 0x00, 0x00, 0x25}
 };
+byte moduleTempData[9];
 byte data[TMP_COUNT][9];
+unsigned int raw;
+float temperature[TMP_COUNT];
+float moduleTemperature;
+byte availableSensors = 0;
 
 struct Command
 {
@@ -113,11 +129,8 @@ byte fanSwitch = 3; // PORTB
 volatile float current;
 volatile float voltage;
 volatile float board5v;
-unsigned int raw;
 float ms;
 float msEEPROM;
-float temperature[TMP_COUNT];
-byte availableSensors = 0;
 
 volatile float coulombCounter = 0; //Ah
 volatile float lastCurrents[100] = {0}; //A
@@ -162,21 +175,18 @@ bool checkIfShut();
 void checkHost();
 
 unsigned int adConversion(byte);
-byte* getTempAdr(byte n);
+byte* getTempAddr(byte n);
 
 void setup()
 {
-  DDRC |= (1<<mosfetSwitch); // mosfetSwitch pin to ouput
-  PORTC &= ~(1<<mosfetSwitch); // write 0 to that pin
-  
-  DDRC |= (1<<mosfetSwitch); // mosfetSwitch pin to ouput
+  DDRC |= (1<<mosfetSwitch); // mosfetSwitch pin to output
   PORTC &= ~(1<<mosfetSwitch); // write 0 to that pin
 
   wdt_disable();
   wdt_reset();
 
   // PWM output on pin 11 (PortB:3)
-  DDRB |= (1<<3); // fanSwitch pin to output
+  DDRB |= (1<<fanSwitch); // fanSwitch pin to output
   OCR2A = FAN_MAX_DUTY_CYCLE; // write PWM value to register
   TCCR2A |= ((1 << COM2A1)); // Non-inverted mode
   TCCR2A |= ((1 << WGM21) | (1 << WGM20)); // Fast PWM mode
@@ -201,7 +211,8 @@ void setup()
       _delay_ms(1000);
     }
     while (!DEBUG);
-  } // These trap loops are to send alert to user interface
+  } 
+  // These trap loops are to send alert to user interface
   // They can be cleared only by full power cycle (for now, atleast)
     
   if(voltage > OVERVOLTAGE)
@@ -230,13 +241,13 @@ void setup()
   byte tmp[4];
   for (int i = 0; i < 4; ++i)
   {
-    tmp[i] = EEPROM.read(i);
+    tmp[i] = EEPROM.read(SOC_START + i);
   }
   memcpy(&coulombCounter, tmp, 4);
   
   for (int i = 0; i < 4; ++i)
   {
-    tmp[i] = EEPROM.read(i+4);
+    tmp[i] = EEPROM.read(SOH_START + i);
   }
   memcpy(&stateOfHealth, tmp, 4);
   
@@ -310,7 +321,9 @@ void loop()
 
 // Secondary loop completed
 
-  readTemps(); // Read and store temperatures
+  // Read and store temperatures
+  readModuleTemp();
+  readTemps();
   wdt_reset();
 
   //calcSOC(); // To be finalized
@@ -407,7 +420,7 @@ void readTemps()
   {
     for (int i = 0; i < TMP_COUNT; ++i)
     {
-      if(pgm_read_byte(tempAdr[i][0]) != 0x00) // This checks if sensors' address table entry has any address in it
+      if(pgm_read_byte(tempAddr[i][0]) != 0x00) // This checks if sensors' address table entry has any address in it
       {
         ++availableSensors;
       }
@@ -420,7 +433,7 @@ void readTemps()
     for(int i = 0; i < availableSensors; ++i)
     {
       ds.reset();
-      ds.select(getTempAdr(i));
+      ds.select(getTempAddr(i));
       // Device selected, commanding to read out the scratchpad");
       
       ds.write(0xBE); // Request sensor to read out the scratchpad
@@ -431,9 +444,8 @@ void readTemps()
       // Data read
     
       if(OneWire::crc8(data[i], 8) != data[i][8])
-      { // If crc is wrong, set all bits to 1
-        for (byte k = 0; k < 9; ++k)
-          data[i][k] = 0xFF;
+      { // If crc is wrong, set bytes 0 and 1 to 0xFF
+        memset(data[i], 0xFF, 2);
       }
     }
   }
@@ -446,18 +458,13 @@ void readTemps()
     // ^ Reads data to temporary container
     if(rawTemp != 0xFFFF)
     {
-      rawTemp &= ~3;
+      rawTemp &= ~0b11;
       // ^ Sets last 2 bits to zero,
       // as 10-bit resolution doesn't use them
   
       temperature[i] = 85.0 * (float(rawTemp) / 1360.0);
-  
-      if(i == 0 && temperature[i] >= 80) // 80'C is max for most chips
-      { // This sensor will be in the mosfet heatsink
-        PORTC &= ~(1<<mosfetSwitch);
-        criticalTFailure = true;
-      }
-      else if(i != 0 && temperature[i] >= OVER_HEAT)
+
+      if(temperature[i] >= OVER_HEAT)
       {
         PORTC &= ~(1<<mosfetSwitch);
         criticalTFailure = true;
@@ -465,6 +472,58 @@ void readTemps()
     }
     else
       temperature[i] = 999.9;
+  }
+}
+
+void readModuleTemp()
+{
+  static byte tmpAddr[8];
+  for (byte i = 0; i < 8; ++i)
+    tmpAddr[i] = pgm_read_byte_near(moduleTempAddr + i);
+    
+  ds.reset();
+  ds.select(tmpAddr);
+  // Device selected, commanding to read out the scratchpad
+      
+  ds.write(0xBE); // Request sensor to read out the scratchpad
+  for (byte i = 0; i < 9; ++i) // Read all 9 bytes
+  {
+    moduleTempData[i] = ds.read();
+  }
+  // Data read
+    
+  if(OneWire::crc8(moduleTempData, 8) != moduleTempData[8])
+  { // If crc is wrong, set bytes 0 and 1 to 0xFF
+    memset(moduleTempData, 0xFF, 2);
+  }
+
+  int16_t rawTemp = 0;
+  rawTemp = 0;
+  rawTemp = (moduleTempData[1] << BYTE) | moduleTempData[0];
+  // ^ Reads data to temporary container
+  if(rawTemp != 0xFFFF)
+  {
+    rawTemp &= ~0b11;
+    // ^ Sets last 2 bits to zero,
+    // as 10-bit resolution doesn't use them
+
+    moduleTemperature = 85.0 * (float(rawTemp) / 1360.0);
+
+    static float val = 0;
+    val = FAN_MAX_DUTY_CYCLE * (moduleTemperature - FAN_ON_THRESH) / (FAN_MAX_THRESH - FAN_ON_THRESH);
+
+    if(val > FAN_MAX_DUTY_CYCLE)
+      OCR2A = FAN_MAX_DUTY_CYCLE;
+    else if(val < 0)
+      OCR2A = 0;
+    else
+      OCR2A = (unsigned int) val;
+
+    if(moduleTemperature >= 80) // 80'C is max for most chips
+    { // This sensor will be in the mosfet heatsink or on pcb
+      PORTC &= ~(1<<mosfetSwitch);
+      criticalTFailure = true;
+    }
   }
 }
 
@@ -485,11 +544,11 @@ unsigned int adConversion(byte ch)
   return ADC;
 }
 
-byte* getTempAdr(byte n)
+byte* getTempAddr(byte n)
 {
   static byte tmp[8];
   for (int i = 0; i < 8; ++i)
-    tmp[i] = pgm_read_byte_near(tempAdr[n]+i);
+    tmp[i] = pgm_read_byte_near(tempAddr[n]+i);
     
   return tmp;
 }
@@ -517,30 +576,39 @@ void sendData()
     sprintf(outputBuffer, ":v%s\n", modBuffer);
     serialWrite();
   }
-  
   systemMonitoring();
+  wdt_reset();
+  
+  if(moduleTemperature <= 125.0)
+  {
+    sendToModBuffer(moduleTemperature);
+    sprintf(outputBuffer, ":t-%s\n", modBuffer);
+  }
+  else
+  {
+    sprintf(outputBuffer, ":t-CRC\n");
+  } 
+  serialWrite();
+  systemMonitoring();
+  wdt_reset();
+  
   for (byte i = 0; i < availableSensors; ++i)
   {
-    if(!(temperature[i] > 125.0))
+    if(temperature[i] <= 125.0)
     {
       sendToModBuffer(temperature[i]);
       sprintf(outputBuffer, ":%i-%s\n", i, modBuffer);
-      serialWrite(); 
-      systemMonitoring();
-      wdt_reset();
     }
     else
     {
       sprintf(outputBuffer, ":%i-CRC\n", i);
-      serialWrite(); 
-      systemMonitoring();
-      wdt_reset();
-    }
-      
+    } 
+    serialWrite(); 
+    systemMonitoring();
+    wdt_reset();
   }
-    sprintf(outputBuffer, "e~\n");
-    serialWrite();
-    _delay_ms(1000);
+  sprintf(outputBuffer, "e~\n");
+  serialWrite();
 }
 
 bool checkIfShut()
@@ -729,7 +797,7 @@ void serialWrite()
 
 void sendToModBuffer(float value)
 {
-  // AVR version of sprintf can't handle float numbers, so this function modifies it to a modBuffer char array
+  // AVR version of sprintf can't handle float numbers, so this function modifies it to an intermediate char array
   memset(modBuffer, 0, sizeof(modBuffer));
   dtostrf(value, 1, 1, modBuffer);
 }
