@@ -45,6 +45,8 @@
 
 OneWire ds(10);
 
+
+//! Should this be moved to own file?
 const byte tempAdr[TMP_COUNT][8] PROGMEM =
 { 
   //{0x28, 0xBA, 0x4B, 0x41, 0x09, 0x00, 0x00, 0xAE},
@@ -104,12 +106,15 @@ struct Command
   unsigned char ch[CMD_CHAR_COUNT] = {'\0', '\0', '\0'};
 };
 
+//! const or #define?
 byte curSense = 0; // PORTC
 byte vsense = 1; // PORTC
 byte curSenseRef = 3; // PORTC
 byte mosfetSwitch = 4; // PORTC
 byte fanSwitch = 3; // PORTB
 
+//! Could these global variables be atleast inside of some struct?
+//! Probably all of them doesn't have to be global
 volatile float current;
 volatile float voltage;
 volatile float board5v;
@@ -141,6 +146,7 @@ bool commandAvailable = false;
 unsigned char outputBuffer[WRITE_BUFFER_SIZE] = {0};
 unsigned char modBuffer[WRITE_BUFFER_SIZE] = {0};
 
+
 bool success = false;
 bool setupSuccess = false;
 bool criticalCFailure = false;
@@ -151,24 +157,34 @@ bool hostUp = false;
 bool hostShut = false;
 bool hostReplied = false;
 
+//! It's good to briefly tell about the function in the declaration
+//! It would be nice to know what inputs the function reads and what outputs the function writes
 void serialSetup();
 void interruptSetup();
 
 void systemMonitoring();
 void readTemps();
 int calcSOC();
+
+//! Even if buffer is global it would be nice to have common function 
+//! that takes pointer to buffer begin as argument and size of the buffer for second argument
+//! It also makes sense to return some success information
 void sendData();
 bool checkIfShut();
 void checkHost();
 
 unsigned int adConversion(byte);
+
+//! Function name doesn't tell what it does. There are hardly any case where you should use incomplete words
 byte* getTempAdr(byte n);
 
+//! Quite big function 
 void setup()
 {
   DDRC |= (1<<mosfetSwitch); // mosfetSwitch pin to ouput
   PORTC &= ~(1<<mosfetSwitch); // write 0 to that pin
   
+  //! Duplicate
   DDRC |= (1<<mosfetSwitch); // mosfetSwitch pin to ouput
   PORTC &= ~(1<<mosfetSwitch); // write 0 to that pin
 
@@ -186,13 +202,17 @@ void setup()
 
   serialSetup();
   
+  //! Could you have function that you just call writeSomething("FooBar\n"); ?
+  //! There is probably some reason to write 'st' to serial. That could be a function?
   sprintf(outputBuffer, "st\n");
   serialWrite();
   
   interruptSetup();
 
+  //! All after this should not probably be in setup because you have to wait something (Interrupt?) to happen 
+  //! until you can continue
   _delay_ms(250);
-  if(current > 0.5 || current < -0.5)
+  if(current > 0.5 || current < -0.5) //! Limits should be constants? not literals
   {
     do
     {
@@ -270,7 +290,7 @@ void setup()
   ds.write_bytes(setCnf, 4);
   ds.reset(); // reset 1-Wire
 
-  if(!(voltage >= 999.9 || current >= 999.9 || current <= -99.9)) 
+  if(!(voltage >= 999.9 || current >= 999.9 || current <= -99.9)) //! These magic numbers (literals) are all over the code without any further information
   {
     sendToModBuffer(current);
     sprintf(outputBuffer, ":c%s\n", modBuffer);
@@ -286,6 +306,9 @@ void setup()
   wdt_enable(WDTO_2S);
 }
 
+//! Some of the setup should be here?
+//! Could you use some kind of state machine here, this would help with the watchdog?
+//! Is there a reason why there is separate timer interupt? Is this called to rarely or do you have some other priorization?
 void loop()
 {
   wdt_reset();
@@ -301,6 +324,7 @@ void loop()
     ds.write(0xCC); // Skip ROM select
     ds.write(0x44); // Command to start measurement  
     ms = millis(); // Store current time
+    //! State machine would save you for this
     while (READ_TIME >= (unsigned long)(millis() - ms)) // Secondary loop
       systemMonitoring();     
     // Do over 200ms if no extra timing is given for temp sensors to do conversion
@@ -340,6 +364,8 @@ void loop()
   #endif
 }
 
+//! Quite long function and hard to say what it does
+//! Dividing this to smaller and properly named function would help
 void systemMonitoring()
 {
   if(criticalCFailure || criticalVFailure || criticalTFailure)
@@ -376,7 +402,7 @@ void systemMonitoring()
   else if(lowVoltage)
   {
     do
-    {
+    {//! Seems duplicate code
       sprintf(outputBuffer, "!v\n");
       serialWrite();
       #if !DEBUG
@@ -401,6 +427,7 @@ void systemMonitoring()
     
 }
 
+//! Temps? Temperature, temporary values? 
 void readTemps()
 {
   if(!availableSensors)
@@ -438,7 +465,7 @@ void readTemps()
     }
   }
 
-  int16_t rawTemp;
+  int16_t rawTemp; //! if I'm correct this is first local variable. Probalby there could be more of these. 
   for (byte i = 0; i < availableSensors; ++i)
   {
     rawTemp = 0;
@@ -454,7 +481,7 @@ void readTemps()
   
       if(i == 0 && temperature[i] >= 80) // 80'C is max for most chips
       { // This sensor will be in the mosfet heatsink
-        PORTC &= ~(1<<mosfetSwitch);
+        PORTC &= ~(1<<mosfetSwitch); //! Could these be in a function with a good name?
         criticalTFailure = true;
       }
       else if(i != 0 && temperature[i] >= OVER_HEAT)
@@ -468,6 +495,7 @@ void readTemps()
   }
 }
 
+//! This is Ok. This function  does only one thing
 unsigned int adConversion(byte ch)
 {
   ADMUX = ((1<<REFS0)| ch); // Select pin and voltage reference
@@ -497,7 +525,7 @@ byte* getTempAdr(byte n)
 void sendData()
 {
   systemMonitoring();  
-  if(PORTC & (1<<mosfetSwitch))
+  if(PORTC & (1<<mosfetSwitch)) //! Function woul tell what we read
   {
     sprintf(outputBuffer, "up\n");
     serialWrite(); 
@@ -508,7 +536,7 @@ void sendData()
     serialWrite(); 
   }
   
-  if(!(voltage >= 999.9 || current >= 999.9 || current <= -99.9)) 
+  if(!(voltage >= 999.9 || current >= 999.9 || current <= -99.9)) //! Magic numbers 
   {
     sendToModBuffer(current);
     sprintf(outputBuffer, ":c%s\n", modBuffer);
@@ -540,11 +568,14 @@ void sendData()
   }
     sprintf(outputBuffer, "e~\n");
     serialWrite();
+    //! It's probably not a good idea wait here, this could be handled in a other way
     _delay_ms(1000);
 }
 
+
 bool checkIfShut()
 {
+//! confusing comment
 // Check all received data
 
   bool rtrn = false;
@@ -643,6 +674,7 @@ ISR(TIMER1_COMPA_vect) // timer1 interrupt
 {
   voltage = 895.0 * (float)adConversion(vsense) / 9207.0; // Simplified Function of (vsense/1023)*board5v*(537/27)
   
+  //! There should be other ways than puttin preprocessor macros inside the code. This just makes the code unreadable
   #if !DEBUG
   if(voltage > OVERVOLTAGE)
   {
